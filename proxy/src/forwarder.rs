@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, RwLock,
@@ -25,7 +25,7 @@ use solana_perf::{
     packet::{PacketBatch, PacketBatchRecycler},
     recycler::Recycler,
 };
-use solana_sdk::clock::Slot;
+use solana_sdk::{clock::Slot, pubkey, pubkey::Pubkey};
 use solana_streamer::{
     sendmmsg::{batch_send, SendPktsError},
     streamer::{self, StreamerReceiveStats},
@@ -37,6 +37,20 @@ use crate::{
     deshred::{ComparableShred, ShredsStateTracker},
     resolve_hostname_port, ShredstreamProxyError,
 };
+
+pub static TARGET_A: Pubkey = pubkey!("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
+pub static TARGET_B: Pubkey = pubkey!("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+
+fn has_both_targets(keys: &[Pubkey]) -> bool {
+    let mut a = false;
+    let mut b = false;
+    for k in keys {
+        if !a && *k == TARGET_A { a = true; }
+        else if !b && *k == TARGET_B { b = true; }
+        if a && b { return true; }
+    }
+    false
+}
 
 // values copied from https://github.com/solana-labs/solana/blob/33bde55bbdde13003acf45bb6afe6db4ab599ae4/core/src/sigverify_shreds.rs#L20
 pub const DEDUPER_FALSE_POSITIVE_RATE: f64 = 0.001;
@@ -99,6 +113,9 @@ pub fn start_forwarder_threads(
                     Vec::<(Slot, Vec<solana_entry::entry::Entry>, Vec<u8>)>::new();
                 let mut highest_slot_seen: Slot = 0;
                 let rs_cache = ReedSolomonCache::default();
+                
+                // UDP socket dla launch transakcji (reużywany)
+                let launch_udp_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
 
                 while !exit.load(Ordering::Relaxed) {
                     match reconstruct_rx.recv_timeout(Duration::from_millis(100)) {
@@ -114,11 +131,36 @@ pub fn start_forwarder_threads(
                             );
 
                             deshredded_entries.drain(..).for_each(
-                                |(slot, _entries, entries_bytes)| {
-                                    let _ = entry_sender.send(PbEntry {
-                                        slot,
-                                        entries: entries_bytes,
-                                    });
+                                |(slot, entries, entries_bytes)| {
+                                    for entry in &entries {
+                                        for transaction in &entry.transactions {
+                                            let account_keys = match &transaction.message {
+                                                solana_sdk::message::VersionedMessage::Legacy(msg) => &msg.account_keys,
+                                                solana_sdk::message::VersionedMessage::V0(msg) => &msg.account_keys,
+                                            };
+                                            
+                                            if has_both_targets(account_keys) {
+                                                info!("LAUNCH DETECTED - Slot {}: Transaction signature: {}", slot, transaction.signatures[0]);
+
+                                                if let Ok(serialized_tx) = bincode::serialize(transaction) {
+                                                    let _ = launch_udp_socket.send_to(&serialized_tx, "127.0.0.1:8002");
+                                                }
+                                                
+                                                // // gRPC (zakomentowane)
+                                                // if let Ok(serialized_tx) = bincode::serialize(transaction) {
+                                                //     let _ = entry_sender.send(PbEntry {
+                                                //         slot,
+                                                //         entries: serialized_tx,
+                                                //     });
+                                                // }
+                                            }
+                                        }
+                                    }
+                                    
+                                    // let _ = entry_sender.send(PbEntry {
+                                    //     slot,
+                                    //     entries: entries_bytes,
+                                    // });
                                 },
                             );
                         }
@@ -161,7 +203,7 @@ pub fn start_forwarder_threads(
                 .name(format!("ssPxyTx_{thread_id}"))
                 .spawn(move || {
                     let send_socket =
-                        UdpSocket::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0))
+                        UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
                             .expect("to bind to udp port for forwarding");
                     let mut local_dest_sockets = unioned_dest_sockets.load();
 

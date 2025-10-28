@@ -1,0 +1,11 @@
+[env]
+PROTOBUF_SRC_BUILD_JOBS = "1"
+ROCKSDB_BUILD_JOBS = "1"
+MAKEFLAGS = "-j1"
+CARGO_TERM_COLOR = "always"
+
+[target.'cfg(unix)'.env]
+PROTOC = "/usr/local/bin/protoc"
+
+[target.'cfg(windows)'.env]
+PROTOC = "/c/protoc/bin/protoc" 

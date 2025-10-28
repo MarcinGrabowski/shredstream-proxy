@@ -19,7 +19,10 @@ use arc_swap::ArcSwap;
 use clap::{arg, Parser};
 use crossbeam_channel::{Receiver, RecvError, Sender};
 use log::*;
+#[cfg(not(windows))]
 use signal_hook::consts::{SIGINT, SIGTERM};
+#[cfg(windows)]
+use signal_hook::consts::SIGINT;
 use solana_client::client_error::{reqwest, ClientError};
 use solana_ledger::shred::Shred;
 use solana_metrics::set_host_id;
@@ -195,28 +198,55 @@ pub fn get_public_ip() -> reqwest::Result<IpAddr> {
 // Creates a channel that gets a message every time `SIGINT` is signalled.
 fn shutdown_notifier(exit: Arc<AtomicBool>) -> io::Result<(Sender<()>, Receiver<()>)> {
     let (s, r) = crossbeam_channel::bounded(256);
-    let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM])?;
-
-    let s_thread = s.clone();
-    thread::spawn(move || {
-        for _ in signals.forever() {
-            exit.store(true, Ordering::SeqCst);
-            // send shutdown signal multiple times since crossbeam doesn't have broadcast channels
-            // each thread will consume a shutdown signal
-            for _ in 0..256 {
-                if s_thread.send(()).is_err() {
-                    break;
+    
+    #[cfg(not(windows))]
+    {
+        let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM])?;
+        let s_thread = s.clone();
+        thread::spawn(move || {
+            for _ in signals.forever() {
+                exit.store(true, Ordering::SeqCst);
+                // send shutdown signal multiple times since crossbeam doesn't have broadcast channels
+                // each thread will consume a shutdown signal
+                for _ in 0..256 {
+                    if s_thread.send(()).is_err() {
+                        break;
+                    }
                 }
             }
-        }
-    });
+        });
+    }
+    
+    #[cfg(windows)]
+    {
+        let s_thread = s.clone();
+        let exit_clone = exit.clone();
+        thread::spawn(move || {
+            let _ = signal_hook::flag::register(SIGINT, exit_clone);
+            loop {
+                if exit.load(Ordering::SeqCst) {
+                    // send shutdown signal multiple times since crossbeam doesn't have broadcast channels
+                    // each thread will consume a shutdown signal
+                    for _ in 0..256 {
+                        if s_thread.send(()).is_err() {
+                            break;
+                        }
+                    }
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+    }
 
     Ok((s, r))
 }
 
 pub type ReconstructedShredsMap = HashMap<Slot, HashMap<u32 /* fec_set_index */, Vec<Shred>>>;
 fn main() -> Result<(), ShredstreamProxyError> {
-    env_logger::builder().init();
+    env_logger::builder()
+        .format_timestamp_micros()
+        .init();
 
     let all_args: Args = Args::parse();
 
@@ -232,12 +262,12 @@ fn main() -> Result<(), ShredstreamProxyError> {
     {
         return Err(ShredstreamProxyError::IoError(io::Error::new(ErrorKind::InvalidInput, "Invalid arguments provided, dynamic endpoints requires both --endpoint-discovery-url and --discovered-endpoints-port.")));
     }
-    if args.endpoint_discovery_url.is_none()
-        && args.discovered_endpoints_port.is_none()
-        && args.dest_ip_ports.is_empty()
-    {
-        return Err(ShredstreamProxyError::IoError(io::Error::new(ErrorKind::InvalidInput, "No destinations found. You must provide values for --dest-ip-ports or --endpoint-discovery-url.")));
-    }
+    // if args.endpoint_discovery_url.is_none()
+    //     && args.discovered_endpoints_port.is_none()
+    //     && args.dest_ip_ports.is_empty()
+    // {
+    //     return Err(ShredstreamProxyError::IoError(io::Error::new(ErrorKind::InvalidInput, "No destinations found. You must provide values for --dest-ip-ports or --endpoint-discovery-url.")));
+    // }
 
     let exit = Arc::new(AtomicBool::new(false));
     let (shutdown_sender, shutdown_receiver) =
@@ -259,17 +289,17 @@ fn main() -> Result<(), ShredstreamProxyError> {
 
     let runtime = Runtime::new()?;
     let mut thread_handles = vec![];
-    if let ProxySubcommands::Shredstream(args) = shredstream_args {
-        if args.desired_regions.len() > 2 {
-            warn!(
-                "Too many regions requested, only regions: {:?} will be used",
-                &args.desired_regions[..2]
-            );
-        }
-        let heartbeat_hdl =
-            start_heartbeat(args, &exit, &shutdown_receiver, runtime, metrics.clone());
-        thread_handles.push(heartbeat_hdl);
-    }
+    // if let ProxySubcommands::Shredstream(args) = shredstream_args {
+    //     if args.desired_regions.len() > 2 {
+    //         warn!(
+    //             "Too many regions requested, only regions: {:?} will be used",
+    //             &args.desired_regions[..2]
+    //         );
+    //     }
+    //     let heartbeat_hdl =
+    //         start_heartbeat(args, &exit, &shutdown_receiver, runtime, metrics.clone());
+    //     thread_handles.push(heartbeat_hdl);
+    // }
 
     // share sockets between refresh and forwarder thread
     let unioned_dest_sockets = Arc::new(ArcSwap::from_pointee(
@@ -314,36 +344,36 @@ fn main() -> Result<(), ShredstreamProxyError> {
     );
     thread_handles.extend(forwarder_hdls);
 
-    let report_metrics_thread = {
-        let exit = exit.clone();
-        spawn(move || {
-            while !exit.load(Ordering::Relaxed) {
-                sleep(Duration::from_secs(1));
-                forward_stats.report();
-            }
-        })
-    };
-    thread_handles.push(report_metrics_thread);
-
-    let metrics_hdl = forwarder::start_forwarder_accessory_thread(
-        deduper,
-        metrics.clone(),
-        args.metrics_report_interval_ms,
-        shutdown_receiver.clone(),
-        exit.clone(),
-    );
-    thread_handles.push(metrics_hdl);
-    if use_discovery_service {
-        let refresh_handle = forwarder::start_destination_refresh_thread(
-            args.endpoint_discovery_url.unwrap(),
-            args.discovered_endpoints_port.unwrap(),
-            args.dest_ip_ports,
-            unioned_dest_sockets,
-            shutdown_receiver.clone(),
-            exit.clone(),
-        );
-        thread_handles.push(refresh_handle);
-    }
+    // let report_metrics_thread = {
+    //     let exit = exit.clone();
+    //     spawn(move || {
+    //         while !exit.load(Ordering::Relaxed) {
+    //             sleep(Duration::from_secargo cs(1));
+    //             forward_stats.report();
+    //         }
+    //     })
+    // };
+    // thread_handles.push(report_metrics_thread);
+    //
+    // let metrics_hdl = forwarder::start_forwarder_accessory_thread(
+    //     deduper,
+    //     metrics.clone(),
+    //     args.metrics_report_interval_ms,
+    //     shutdown_receiver.clone(),
+    //     exit.clone(),
+    // );
+    // thread_handles.push(metrics_hdl);
+    // if use_discovery_service {
+    //     let refresh_handle = forwarder::start_destination_refresh_thread(
+    //         args.endpoint_discovery_url.unwrap(),
+    //         args.discovered_endpoints_port.unwrap(),
+    //         args.dest_ip_ports,
+    //         unioned_dest_sockets,
+    //         shutdown_receiver.clone(),
+    //         exit.clone(),
+    //     );
+    //     thread_handles.push(refresh_handle);
+    // }
 
     if let Some(port) = args.grpc_service_port {
         let server_hdl = server::start_server_thread(

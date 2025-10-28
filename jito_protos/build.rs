@@ -4,7 +4,13 @@ fn main() {
     const PROTOC_ENVAR: &str = "PROTOC";
     if std::env::var(PROTOC_ENVAR).is_err() {
         #[cfg(not(windows))]
-        std::env::set_var(PROTOC_ENVAR, protobuf_src::protoc());
+        {
+            if let Ok(protoc_path) = which::which("protoc") {
+                std::env::set_var(PROTOC_ENVAR, protoc_path);
+            } else {
+                panic!("protoc not found. Install newer version.");
+            }
+        }
     }
 
     configure()

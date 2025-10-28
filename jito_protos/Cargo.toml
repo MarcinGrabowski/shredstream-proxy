@@ -13,5 +13,8 @@ prost-types = { workspace = true }
 tonic = { workspace = true }
 
 [build-dependencies]
-protobuf-src = "1"
 tonic-build = { workspace = true }
+which = "4.0"
+
+# [target.'cfg(unix)'.build-dependencies]
+# protobuf-src = "1"

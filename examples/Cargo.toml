@@ -5,10 +5,17 @@ publish = false
 
 [dependencies]
 bincode = { workspace = true }
+env_logger = { workspace = true }
 jito-protos = { path = "../jito_protos" }
+log = { workspace = true }
 solana-entry = { workspace = true }
+solana-sdk = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 
 [[example]]
 name = "deshred"
 path = "deshred.rs"
+
+[[example]]
+name = "udp"
+path = "udp.rs"

@@ -1,9 +1,13 @@
 use jito_protos::shredstream::{
     shredstream_proxy_client::ShredstreamProxyClient, SubscribeEntriesRequest,
 };
+use log::info;
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
+    env_logger::builder()
+        .format_timestamp_micros()
+        .init();
     let mut client = ShredstreamProxyClient::connect("http://127.0.0.1:9999")
         .await
         .unwrap();
@@ -14,19 +18,18 @@ async fn main() -> Result<(), std::io::Error> {
         .into_inner();
 
     while let Some(slot_entry) = stream.message().await.unwrap() {
-        let entries =
-            match bincode::deserialize::<Vec<solana_entry::entry::Entry>>(&slot_entry.entries) {
-                Ok(e) => e,
-                Err(e) => {
-                    println!("Deserialization failed with err: {e}");
-                    continue;
-                }
-            };
-        println!(
-            "slot {}, entries: {}, transactions: {}",
+        let transaction = match bincode::deserialize::<solana_sdk::transaction::VersionedTransaction>(&slot_entry.entries) {
+            Ok(transaction) => transaction,
+            Err(e) => {
+                println!("Deserialization failed with err: {e}");
+                continue;
+            }
+        };
+        
+        info!(
+            "RECEIVED LAUNCH TRANSACTION - Slot {}: {}",
             slot_entry.slot,
-            entries.len(),
-            entries.iter().map(|e| e.transactions.len()).sum::<usize>()
+            transaction.signatures[0]
         );
     }
     Ok(())

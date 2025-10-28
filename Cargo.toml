@@ -45,3 +45,9 @@ tonic-build = "0.13"
 [profile.release]
 # thin has minimal overhead vs none (default): https://blog.llvm.org/2016/06/thinlto-scalable-and-incremental-lto.html
 lto = "thin"
+
+[profile.release.package."protobuf-src"]
+opt-level = 1
+
+[profile.release.package."librocksdb-sys"]
+opt-level = 1
